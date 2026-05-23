@@ -1,0 +1,57 @@
+// Backup do src/main.cpp original (loop de MP3 do SD).
+// Restaurar este conteúdo em src/main.cpp quando voltarmos do teste de tom.
+
+#include <Arduino.h>
+#include "Audio.h"
+#include "SD_MMC.h"
+#include "FS.h"
+#include "driver/gpio.h"
+#include "Wire.h"
+
+#define I2S_BCLK  27
+#define I2S_LRC   25
+#define I2S_DOUT  26
+#define I2S_MCLK  0
+
+Audio audio;
+const char* FILE_TO_LOOP = "/loop.mp3";
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Habilita amplificador dos speakers
+  pinMode(21, OUTPUT);
+  digitalWrite(21, HIGH);
+
+  Wire.begin(33, 32);
+
+  pinMode(13, OUTPUT);
+  digitalWrite(13, HIGH);
+  delay(100);
+  gpio_set_pull_mode(GPIO_NUM_14, GPIO_PULLUP_ONLY);
+  gpio_set_pull_mode(GPIO_NUM_15, GPIO_PULLUP_ONLY);
+  gpio_set_pull_mode(GPIO_NUM_2,  GPIO_PULLUP_ONLY);
+  gpio_set_pull_mode(GPIO_NUM_13, GPIO_PULLUP_ONLY);
+
+  SD_MMC.setPins(14, 15, 2);
+  if (!SD_MMC.begin("/sdcard", true, false, 400000)) {
+    Serial.println("SD não encontrado!");
+    while (true);
+  }
+  Serial.println("SD OK!");
+
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT, I2S_MCLK);
+  audio.setVolume(21);
+  audio.connecttoFS(SD_MMC, FILE_TO_LOOP);
+  Serial.println("Tocando...");
+}
+
+void loop() {
+  audio.loop();
+}
+
+void audio_eof_mp3(const char* info) {
+  delay(100);
+  audio.connecttoFS(SD_MMC, FILE_TO_LOOP);
+}
