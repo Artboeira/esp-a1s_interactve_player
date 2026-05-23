@@ -1,37 +1,36 @@
-# ESP32 A1S Audio Kit — Loop Player
+# ESP32 A1S — One-shot MP3 Player com Ímã e LED
 
-Player de áudio simples com loop contínuo de arquivo MP3 via cartão SD, para o board **AI-Thinker ESP32 Audio Kit V2.2** com módulo **ESP-A1S**.
+Player de áudio para instalação interativa, rodando em **AI-Thinker ESP32 Audio Kit V2.2** (módulo **ESP-A1S** com codec **ES8388**). Cada toque no botão dispara um MP3 do começo, com saída no headphone; em paralelo, dois relés controlam um ímã (que acompanha o som) e o LED indicador do próprio botão.
 
 ## Hardware
 
-- **Board:** AI-Thinker ESP32 Audio Kit V2.2
-- **Módulo:** ESP-A1S (ESP32 + codec ES8388)
-- **SD Card:** SanDisk Ultra 32GB (FAT32)
-- **Audio file:** `/loop.mp3` na raiz do SD
+| Item | Detalhe |
+|---|---|
+| Board | AI-Thinker ESP32 Audio Kit V2.2 (ESP-A1S + ES8388) |
+| SD Card | qualquer cartão FAT32 com `/loop.mp3` na raiz (testado em SanDisk Ultra 32 GB) |
+| Áudio | Saída pelo jack EARPHONES (LOUT1/ROUT1); o speaker da placa também toca em paralelo se PA_EN=HIGH |
+| Botão debug | KEY3 onboard (GPIO19) — toggle play/stop |
+| Botão externo | Microswitch SPDT: COM→GND, NO→GPIO22; LED interno do botão é alimentado via relé |
+| Relé canal A | GPIO18 → IN; cabeado com o ímã via NC. Liga em PLAY, desliga em STOP. |
+| Relé canal B | GPIO23 → IN; cabeado com o LED do microswitch via NC. Aceso em STOPPED; pisca por 3 s em PLAY e depois apaga. |
+| Alimentação | A1S via USB ou fonte 5 V no header; **módulo relé com fonte 5 V dedicada** e GND comum com a A1S. |
 
-## Estado atual
+DIP switches da placa (crítico pro SD funcionar): `ON OFF OFF ON OFF` (DATA3 e CMD em ON).
 
-- ✅ SD card inicializa (SD_MMC, modo 1-bit)
-- ✅ Codec ES8388 inicializa via I2C (`0x10`)
-- ✅ I2S TX manual via `driver/i2s.h` legada
-- ✅ Playback `/loop.mp3` do SD → libhelix → I2S → ES8388 → headphone
-- ✅ **Botões em paralelo:** KEY3 onboard (GPIO19, debug) + microswitch externo (GPIO22) — ambos toggle start/stop
-- ✅ EOF do MP3 → STOPPED (one-shot por toque, não loopa)
-- ✅ Relé 2 canais (IN1→GPIO23, IN2→GPIO18, active-low): canais separados no hw, espelhados via software por enquanto. STOPPED → LED aceso constante. PLAYING → LED piscando 1 Hz.
-- ⏳ Próximo: dar comportamentos distintos a IN1 e IN2 (cada um pra uma saída) e/ou OSC/MQTT via WiFi
+## Comportamento
 
-`src/main.cpp` é o player. Dois estados (`STOPPED` ↔ `PLAYING`), transições centralizadas em `playerStart()` / `playerStop()` — é onde o relé e o LED do botão vão entrar.
+| Estado | Áudio | Ímã (GPIO18) | LED do botão (GPIO23) |
+|---|---|---|---|
+| **STOPPED** (boot ou pós-EOF) | mudo (DAC mute) | OFF | aceso constante |
+| **PLAYING**, primeiros 3 s | tocando do início | ON | piscando 1 Hz (~3 piscadas) |
+| **PLAYING**, após 3 s | continua tocando | ON | apagado fixo |
+| **EOF do MP3** ou 2º toque | para com fade do buffer DMA | volta a OFF | volta a aceso |
 
-Dependência única hoje: `pschatzmann/arduino-libhelix`. O init do codec mora todo no `main.cpp` — `esphome/ESP32-audioI2S` foi removida do projeto.
+Iniciar tocando direto após o boot: trocar `#define START_PLAYING false` para `true` no `src/main.cpp`.
 
-## Por que não tocava antes
+## Por que esse projeto existe (e por que dá tanto trabalho)
 
-Dois bugs combinados (detalhes em `CLAUDE.md`):
-
-1. **DAC saía do reset mutado.** `REG 0x19` (DACCONTROL3) tem default `0x32` com bit 5 (`DACMute`) em 1. Sem limpar para `0x02`, o DAC ignora todos os samples — produzindo só o estalo da saída ligando.
-2. **Registros de roteamento errados.** O código antigo escrevia em `REG 0x26..0x29` achando que eram "Mixer L1/L2/R1/R2"; eram, na verdade, seleção de input (LINSEL/RINSEL) e bypass de line-in. O roteamento DAC → Mixer real é `REG 0x27` (LD2LO) e `REG 0x2A` (RD2RO).
-
-A lib `esphome/ESP32-audioI2S` não limpa o DACMute na init automática do ES8388 — por isso "estalo mas sem áudio".
+A placa A1S é conhecida por ser difícil de fazer áudio sair pelo headphone via Arduino. O caminho que funciona é fazer **init manual do ES8388** via I2C — nenhuma das libs Arduino populares (`esphome/ESP32-audioI2S`, `schreibfaul1/ESP32-audioI2S`) limpa o bit `DACMute` (`REG 0x19`, default `0x32`), e por isso o codec inicializa, energiza a saída (gera um estalo audível no fone), mas o DAC fica mudo. A correção é `REG19 = 0x02` na init manual, e usar os registros corretos de roteamento (`REG 0x27` e `REG 0x2A`, não `0x26..0x29` como muitas instruções antigas sugerem). Ver `CLAUDE.md` para o root cause completo com tabela de registros e dump validado.
 
 ## Build & run
 
@@ -44,4 +43,16 @@ pio run -t upload -t monitor  # upload + monitor (fluxo de iteração)
 
 Porta serial típica no Mac: `/dev/cu.usbserial-0001`. CLI do PlatformIO costuma estar em `~/.platformio/penv/bin/pio` (não no PATH global).
 
-Ver `CLAUDE.md` para contexto técnico completo (mapa dos registros, fluxo do sinal, plano para o player MP3).
+## Estrutura do projeto
+
+```
+src/main.cpp                  Player completo: ES8388 init, I2S, SD, Helix, relés, botões.
+platformio.ini                board=esp32dev, framework=arduino, lib única: arduino-libhelix.
+docs/main_mp3_loop.cpp.bak    Backup histórico (esphome/ESP32-audioI2S) — não restaurar.
+CLAUDE.md                     Contexto técnico para futura iteração com Claude Code.
+```
+
+## Próximas etapas
+
+- Controle remoto via OSC ou MQTT (WiFi) — sincronizar peças ou disparar via servidor.
+- Trocar o cabeamento do ímã do NC → NO + `MAGNET_ON_NC=0` em instalação prolongada, para evitar desgaste da bobina (em STOPPED o relé do ímã fica permanentemente energizado para manter o ímã off).

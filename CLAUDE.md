@@ -21,7 +21,7 @@ O CLI do PlatformIO costuma estar em `~/.platformio/penv/bin/pio` (não no PATH 
 
 ## Objetivo
 
-Loop de MP3 no **ESP32 Audio Kit V2.2 (ESP-A1S)** com saída pelo jack **EARPHONES (headphone)**, a partir de cartão SD.
+Player one-shot de MP3 no **ESP32 Audio Kit V2.2 (ESP-A1S)** com saída pelo jack **EARPHONES (headphone)**, a partir de cartão SD. Cada toque no botão (KEY3 onboard ou microswitch externo) dispara `/loop.mp3` do começo. Dois relés acompanham o playback — um liga um ímã e outro controla o LED do microswitch.
 
 ## Estado atual
 
@@ -30,8 +30,10 @@ Loop de MP3 no **ESP32 Audio Kit V2.2 (ESP-A1S)** com saída pelo jack **EARPHON
 - ✅ I2S TX direto via `driver/i2s.h` legada
 - ✅ Playback `/loop.mp3` do SD → libhelix MP3 → I2S → ES8388 → headphone (`src/main.cpp`)
 - ✅ Toggle start/stop via KEY3 onboard (GPIO19, debug) **e** microswitch externo (GPIO22) em paralelo
-- ✅ EOF do MP3 → STOPPED (one-shot por toque; não loopa mais perpetuamente)
-- ⏳ Próximas etapas: relé 2 canais (uma das saídas alimenta o LED do microswitch), possivelmente OSC/MQTT via WiFi
+- ✅ EOF do MP3 → STOPPED (one-shot por toque)
+- ✅ Relé canal A (GPIO18) → ímã, cabeado no NC → on em PLAY, off em STOP
+- ✅ Relé canal B (GPIO23) → LED do microswitch, cabeado no NC → aceso em STOPPED, pisca 3 s e apaga em PLAY
+- ⏳ Próxima etapa: possivelmente OSC/MQTT via WiFi (controle remoto / sincronização entre peças)
 
 Dependências hoje no `platformio.ini`: apenas `pschatzmann/arduino-libhelix` (decoder MP3). A lib `esphome/ESP32-audioI2S` foi **removida** — ela não limpava o `DACMute` e era o motivo do "estalo sem áudio". O init manual do codec mora todo no `main.cpp`.
 
@@ -102,8 +104,11 @@ REG30 / REG31           = 0x1E   ← LOUT2/ROUT2 vol 0 dB
 | Headphone detect | GPIO39 — LOW = headphone conectado. Software-only (não roteia sozinho). |
 | Botão KEY3 (onboard, debug) | GPIO19 — pull-up físico na placa; pressionado = LOW |
 | Microswitch externo (play/stop) | COM → GND do header; NO → GPIO22 (com `INPUT_PULLUP`). LED do microswitch é alimentado pelo relé (não conecta ao ESP32). |
-| Módulo relé 2 canais | **IN1 → GPIO23, IN2 → GPIO18**. Fonte 5V dedicada; **GND da fonte 5V compartilhado com GND da A1S**. **Este módulo específico é active-HIGH** (`#define RELAY_ACTIVE_LOW 0`) — testado em bancada; o esperado seria active-low, mas inverteu. Se trocar de módulo, conferir e ajustar o define. Canais separados no hardware, espelhados via software em `relayWrite()`. GPIO16/17 são reservados para PSRAM do ESP-A1S e **não saem nos headers**. |
-| LED do microswitch (via relé canal 1) | LED+ → +12V; LED- → NC; COM relé → GND da fonte 12V. → Relé desarmado (IN=HIGH): LED aceso. Relé armado (IN=LOW): LED apagado. |
+| Relé canal A — ÍMÃ | IN → **GPIO18**. Ímã cabeado no **NC** do relé. Comportamento: STOPPED relé armado (NC aberto, ímã off); PLAY relé desarmado (NC fecha, ímã energizado). Lógica invertida no software por `#define MAGNET_ON_NC 1`. |
+| Relé canal B — LED do microswitch | IN → **GPIO23**. LED+ → +12V; LED- → NC; COM → GND 12V. Relé desarmado → NC fecha → LED aceso. PLAY pisca por `LED_BLINK_DURATION_MS` e depois fica apagado até STOP/EOF. |
+| Polaridade do módulo relé | **active-HIGH** (`#define RELAY_ACTIVE_LOW 0`) — testado em bancada. Se trocar de módulo, conferir o LED no estado STOPPED logo após boot: deve estar aceso. |
+| Alimentação do relé | Fonte 5V dedicada para a bobina/opto; **GND da fonte 5V compartilhado com GND da A1S** (sem isso o optoacoplador não enxerga o nível). |
+| Não usar | GPIO16/17 — reservados para PSRAM do ESP-A1S, não saem nos headers. |
 
 ### DIP switches (crítico para o SD)
 
@@ -167,34 +172,42 @@ Pontos sensíveis para futuras mudanças:
 Há **dois estados** (`bool playing`). Toda mudança passa por uma de duas funções; quando o relé e o LED do botão entrarem, **é dentro delas que se mexe** — nunca espalhar transições pelo `loop()`.
 
 ```
-                ┌───────────────────────────┐
-                │   STOPPED                 │
-                │   - DAC mutado (REG19=32) │
-                │   - DMA buffer zerado     │
-                │   - Relé IN1(GPIO23)=IN2(GPIO18)=HIGH (desarmados)
-                │   - LED microswitch: ACESO constante
-                └────────────┬──────────────┘
-                             │ botão (KEY3 ou microswitch externo) flanco ↓  →  playerStart()
+                ┌──────────────────────────────────┐
+                │   STOPPED                        │
+                │   - DAC mutado (REG19=32)        │
+                │   - DMA buffer zerado            │
+                │   - Ímã (GPIO18) OFF             │
+                │   - LED (GPIO23) ACESO constante │
+                └────────────┬─────────────────────┘
+                             │ botão (KEY3 ou microswitch externo) flanco ↓
+                             │   → playerStart()
                              │
-                ┌────────────▼──────────────┐
-                │   PLAYING                 │
-                │   - DAC unmute (REG19=02) │
-                │   - decoder Helix resetado│
-                │   - audioFile.seek(0)     │
-                │   - Relé IN1(GPIO23)=IN2(GPIO18) alternando a cada 1 s
-                │   - LED microswitch: PISCANDO 1 Hz
-                └────────────┬──────────────┘
-                             │ botão (KEY3 ou microswitch externo) flanco ↓  OU  EOF do MP3
-                             │       → playerStop()
+                ┌────────────▼─────────────────────┐
+                │   PLAYING                        │
+                │   - DAC unmute (REG19=02)        │
+                │   - decoder Helix resetado       │
+                │   - audioFile.seek(0)            │
+                │   - Ímã (GPIO18) ON durante toda a execução
+                │   - LED (GPIO23): primeiros 3 s → piscando 1 Hz
+                │                   após 3 s     → armado fixo → APAGADO
+                └────────────┬─────────────────────┘
+                             │ botão (KEY3 ou microswitch externo) flanco ↓
+                             │ OU EOF do MP3
+                             │   → playerStop()
                              └──→ volta a STOPPED
 ```
+
+Constantes que controlam o LED em `main.cpp`:
+- `LED_BLINK_DURATION_MS` (3000 hoje) — duração total da fase de blink após PLAY.
+- `LED_BLINK_HALF_PERIOD_MS` (500 hoje) — meio período do blink, 500 ms ON / 500 ms OFF → 1 Hz visual, ~3 piscadas em 3 s.
+- `MAGNET_ON_NC` (1 hoje) — ímã está no NC do relé; software inverte para que `magnetSet(true)` energize o ímã. Trocar fisicamente para NO + definir 0 reduz desgaste da bobina em instalações de longa duração.
 
 **Pontos sensíveis:**
 - `playerStop` espera o DMA buffer drenar (`delay(60)` no caminho EOF, antes do mute) para não cortar o final do áudio. No caminho via botão, mutar imediatamente é OK — o usuário quer silêncio agora.
 - `playerStart` faz `mp3.end()` + `mp3.begin()` para zerar bytes parciais de frame que sobraram da execução anterior, antes do `seek(0)`. Sem isso, o 1º frame após restart vem corrompido.
 - O estado inicial após boot é STOPPED (`#define START_PLAYING false`). Se quiser que a placa toque sozinha ao ligar, mude para `true`.
-- O `relayWrite()` é chamado direto dentro de `playerStart` (arma) e `playerStop` (desarma) → feedback visual instantâneo no LED. O blink propriamente dito é gerenciado pelo `relayUpdateBlink()` no `loop()` enquanto `playing == true`.
-- **Clique mecânico**: a 1 Hz o relé clica audivelmente e a bobina sofre desgaste com o tempo. Para instalação prolongada, considerar (a) aumentar `BLINK_HALF_PERIOD_MS`, (b) trocar por SSR, ou (c) cabear o LED direto a um GPIO via transistor (perde o controle do canal 2 de 12 V, mas elimina o clique).
+- **Ímã e LED são controlados separadamente.** `magnetSet()` / `ledSet()` são chamados de `playerStart` / `playerStop` para sincronizar com o áudio; `ledUpdate()` é chamado no `loop()` e cuida da máquina interna do LED (blink 3 s → apagado fixo).
+- **Clique mecânico durante o blink**: a 1 Hz o relé do LED clica 3× em 3 s. Já é curto, mas se incomodar dá pra trocar por SSR ou cabear o LED via transistor num GPIO PWM (perde o canal de 12 V controlável, mas remove o clique).
 
 ## Plano B se algo der ruim
 
@@ -211,7 +224,5 @@ Há **dois estados** (`bool playing`). Toda mudança passa por uma de duas funç
 
 ## Próximas etapas do projeto
 
-Depois do loop MP3 estável:
-- Relé de 2 canais (controle via GPIO).
-- Botão físico de start/stop do loop.
-- Possivelmente controle OSC/MQTT via WiFi (padrão das instalações).
+- Possivelmente controle OSC/MQTT via WiFi (padrão das instalações) — para sincronização entre peças ou controle remoto.
+- Avaliar trocar o relé do ímã (NC → NO) em instalação prolongada para evitar desgaste da bobina, conforme nota em `MAGNET_ON_NC`.

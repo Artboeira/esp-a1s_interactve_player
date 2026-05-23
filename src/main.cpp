@@ -1,15 +1,19 @@
-// Loop de /loop.mp3 do SD → decoder Helix → I2S → ES8388 → headphone+speaker.
-// Mantém o init manual do ES8388 e do I2S que validamos no teste de tom 440 Hz.
+// Player one-shot de /loop.mp3 para AI-Thinker ESP32 Audio Kit V2.2 (ESP-A1S).
+// Cada toque no botão (KEY3 onboard ou microswitch externo) dispara o arquivo
+// do começo. Tocar de novo durante a reprodução, ou chegar ao EOF, volta ao
+// estado STOPPED. Em paralelo, dois relés controlam um ímã e o LED do botão.
 //
-// Cadeia:
-//   SD_MMC (1-bit) → arquivo /loop.mp3
+// Cadeia de áudio:
+//   SD_MMC (1-bit) → /loop.mp3
 //     → libhelix MP3DecoderHelix (chunks de 4 KB)
 //       → callback com PCM int16 entrelaçado L/R
 //         → i2s_write bloqueante na I2S0
-//           → ES8388 DAC → LMix/RMix → LOUT1/ROUT1 + LOUT2/ROUT2
+//           → ES8388 (init manual) DAC → LMix/RMix → LOUT1/ROUT1 + LOUT2/ROUT2
 //
 // Sample rate da I2S é ajustado para o sampRate do MP3 na 1ª frame decodificada.
-// Quando o arquivo termina, faz seek(0) e continua → loop perpétuo.
+// O DAC do ES8388 sai do reset MUTADO (REG19 default 0x32); é necessário
+// escrever 0x02 para liberar áudio — esse era o motivo do antigo "estalo
+// mas sem som". Ver CLAUDE.md para o root cause completo.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -37,22 +41,34 @@
 #define BUTTON_DEBOUNCE_MS 30
 
 // Relé externo 2 canais (alimentação 5V dedicada, GND comum com A1S).
-// Active-low típico de módulos chineses com optoacoplador.
-// Canais separados (preparado para comportamentos distintos no futuro),
-// hoje espelhados via relayWrite().
-// Nota: GPIO16/17 são reservados para PSRAM do módulo ESP-A1S — NÃO saem
-// nos headers, não usar.
+// Módulo testado em bancada: active-HIGH (RELAY_ACTIVE_LOW=0).
 //
-// LED do microswitch (instalação atual):
-//   LED+ → +12V (fonte externa, direto)
-//   LED- → NC do relé canal 1
-//   COM relé canal 1 → GND da fonte 12V
-//   → Relé DESARMADO (IN=HIGH): NC fecha, LED ACESO
-//   → Relé  ARMADO  (IN=LOW):  NO fecha, LED APAGADO
-#define RELAY_IN1_PIN 23
-#define RELAY_IN2_PIN 18
-#define RELAY_ACTIVE_LOW 0    // este módulo respondeu como active-HIGH (testado 2026-05-23)
-#define BLINK_HALF_PERIOD_MS 1000   // 1 s aceso / 1 s apagado
+// Mapeamento desta instalação:
+//   ÍMÃ  →  GPIO18 → IN do canal cabeado em série com a bobina do ímã,
+//           via NC (ver MAGNET_ON_NC abaixo). Liga em PLAY, desliga em STOP.
+//   LED  →  GPIO23 → IN do canal do LED do microswitch.
+//           LED+ → +12V; LED- → NC; COM canal → GND 12V.
+//           relé DESARMADO → NC fecha → LED ACESO
+//           relé ARMADO    → NO fecha → LED APAGADO
+//           Em STOPPED: aceso constante. Em PLAY: pisca por LED_BLINK_DURATION_MS,
+//           depois fica apagado até STOP/EOF.
+//
+// GPIO16/17 são reservados para PSRAM do módulo ESP-A1S — NÃO saem nos
+// headers, não usar.
+#define MAGNET_PIN 18
+#define LED_PIN    23
+#define RELAY_ACTIVE_LOW 0    // testado em bancada: este módulo é active-HIGH.
+
+// Ímã cabeado no NC do relé: energiza naturalmente quando o relé está
+// desarmado. Para inverter, mover o fio do ímã do NC pro NO no módulo e
+// trocar este define para 0.
+// Atenção: com MAGNET_ON_NC=1, em STOPPED o relé fica permanentemente
+// armado para manter o ímã off — desgaste contínuo da bobina ao longo do
+// tempo. Para instalação prolongada, prefira trocar para NO + MAGNET_ON_NC=0.
+#define MAGNET_ON_NC 1
+
+#define LED_BLINK_DURATION_MS    3000  // duração total da fase de blink após PLAY
+#define LED_BLINK_HALF_PERIOD_MS 500   // 500 ms ON / 500 ms OFF → 1 Hz, ~3 piscadas em 3 s
 // Inicia STOPPED (espera 1º toque). Mudar para true se quiser começar tocando.
 #define START_PLAYING false
 
@@ -187,41 +203,68 @@ static MP3DecoderHelix mp3(mp3DataCallback);
 static File audioFile;
 static uint8_t sdBuf[SD_BUF_BYTES];
 
+// Declarada antes dos relés porque ledUpdate() consulta este estado.
+static bool playing = false;
+
 // ---------------- relays ----------------
 
-static bool relayArmed = false;
-static unsigned long relayLastFlip = 0;
+static bool magnetArmed = false;
+static bool ledArmed    = false;     // ledArmed=true  →  LED APAGADO (NC aberto)
+                                     // ledArmed=false →  LED ACESO  (NC fechado)
+static unsigned long playStartMs   = 0;
+static unsigned long ledLastFlipMs = 0;
 
-static void relayWrite(bool armed) {
-  int level = RELAY_ACTIVE_LOW ? (armed ? LOW : HIGH) : (armed ? HIGH : LOW);
-  digitalWrite(RELAY_IN1_PIN, level);
-  digitalWrite(RELAY_IN2_PIN, level);
-  relayArmed = armed;
-  relayLastFlip = millis();
+static int activeLevel(bool armed) {
+  return RELAY_ACTIVE_LOW ? (armed ? LOW : HIGH) : (armed ? HIGH : LOW);
 }
 
-// Chamada de player state: STOPPED → LED aceso (relé desarmado).
-static void relayHoldStopped() {
-  if (relayArmed) relayWrite(false);
+static void magnetSet(bool on) {
+  // on = ímã energizado fisicamente. Se cabeado no NC, precisamos do
+  // relé DESARMADO para fechar o circuito do ímã.
+  bool relayArmed = MAGNET_ON_NC ? !on : on;
+  digitalWrite(MAGNET_PIN, activeLevel(relayArmed));
+  magnetArmed = on;
 }
 
-// Chamada no loop: enquanto PLAYING, alterna a cada BLINK_HALF_PERIOD_MS.
-static void relayUpdateBlink() {
-  if (millis() - relayLastFlip >= BLINK_HALF_PERIOD_MS) {
-    relayWrite(!relayArmed);
+static void ledSet(bool armed) {
+  digitalWrite(LED_PIN, activeLevel(armed));
+  ledArmed = armed;
+}
+
+// Chamada continuamente no loop. Garante o estado do LED conforme a
+// máquina de estados:
+//   STOPPED                    → LED aceso (desarmado)
+//   PLAYING, primeiros 3 s     → LED piscando 1 Hz
+//   PLAYING, após 3 s          → LED apagado (armado fixo)
+static void ledUpdate() {
+  if (!playing) {
+    if (ledArmed) ledSet(false);
+    return;
+  }
+  unsigned long now = millis();
+  unsigned long elapsed = now - playStartMs;
+  if (elapsed < LED_BLINK_DURATION_MS) {
+    if (now - ledLastFlipMs >= LED_BLINK_HALF_PERIOD_MS) {
+      ledSet(!ledArmed);
+      ledLastFlipMs = now;
+    }
+  } else {
+    if (!ledArmed) {
+      ledSet(true);
+      Serial.println("[led] blink terminou, mantendo apagado");
+    }
   }
 }
 
 // ---------------- player state ----------------
-
-static bool playing = false;
 
 static void playerStop() {
   if (!playing) return;
   playing = false;
   es_write(0x19, 0x32);                  // mute DAC (limpa pop)
   i2s_zero_dma_buffer(I2S_PORT);
-  relayHoldStopped();                    // LED aceso constante
+  magnetSet(false);                      // desliga ímã
+  ledSet(false);                         // LED volta aceso constante
   Serial.println("[player] STOP");
 }
 
@@ -233,9 +276,11 @@ static void playerStart() {
   audioFile.seek(0);
   es_write(0x19, 0x02);                  // unmute DAC
   playing = true;
-  relayWrite(true);                      // arma já: LED apaga imediatamente,
-                                         // dando feedback visual instantâneo
-  Serial.println("[player] START");
+  playStartMs = millis();
+  ledLastFlipMs = playStartMs;
+  magnetSet(true);                       // liga ímã imediatamente
+  ledSet(true);                          // LED apaga já — 1ª meia-onda do blink
+  Serial.println("[player] START (ímã ON, LED blink 3 s)");
 }
 
 static void playerToggle() {
@@ -308,13 +353,15 @@ void setup() {
   pinMode(BUTTON_KEY3_PIN, INPUT_PULLUP);
   pinMode(BUTTON_EXT_PIN,  INPUT_PULLUP);
 
-  // Relé: fixa o nível ANTES de virar OUTPUT para evitar pulso espúrio no boot.
-  int idle = RELAY_ACTIVE_LOW ? HIGH : LOW;
-  digitalWrite(RELAY_IN1_PIN, idle);
-  digitalWrite(RELAY_IN2_PIN, idle);
-  pinMode(RELAY_IN1_PIN, OUTPUT);
-  pinMode(RELAY_IN2_PIN, OUTPUT);
-  relayWrite(false);                     // estado seguro inicial: LED aceso
+  // Relés: fixa o nível ANTES de virar OUTPUT para evitar pulso espúrio no boot.
+  //  - Ímã: queremos OFF. Se cabeado no NC, isso exige o relé ARMADO.
+  //  - LED: queremos ACESO. Cabeado no NC → relé DESARMADO.
+  digitalWrite(MAGNET_PIN, activeLevel(MAGNET_ON_NC ? true : false));
+  digitalWrite(LED_PIN,    activeLevel(false));
+  pinMode(MAGNET_PIN, OUTPUT);
+  pinMode(LED_PIN,    OUTPUT);
+  magnetSet(false);
+  ledSet(false);
 
   // Estado inicial
   if (START_PLAYING) {
@@ -327,13 +374,12 @@ void setup() {
 
 void loop() {
   pollButtons();
+  ledUpdate();
 
   if (!playing) {
     delay(5);
     return;
   }
-
-  relayUpdateBlink();
 
   if (!audioFile.available()) {
     // DMA buffer atual = 8 × 256 frames a 44.1 kHz ≈ 46 ms; esperamos um pouco
