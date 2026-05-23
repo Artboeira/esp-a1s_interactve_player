@@ -112,7 +112,25 @@ REG30 / REG31           = 0x1E   ← LOUT2/ROUT2 vol 0 dB
 
 ### DIP switches (crítico para o SD)
 
-DATA3 e CMD em **ON**, resto OFF: `ON - OFF - OFF - ON - OFF`.
+O DIP de 5 posições da A1S é um **roteador de GPIOs compartilhados**. Os pinos `GPIO13`, `GPIO14` e `GPIO15` do ESP32 servem múltiplas funções na placa (SD card, botão KEY2, header JTAG), e o DIP escolhe qual delas está fisicamente conectada. Como só uma função pode estar ativa por vez, **usar o SD exige desconectar todas as outras** — caso contrário há conflito elétrico nas linhas e o SD não monta (ou monta intermitente).
+
+Mapeamento nesta unidade (a serigrafia varia por revisão da placa; conferir antes em outras unidades):
+
+| Pos | Rótulo | GPIO afetado | Função quando ON | Estado para este projeto |
+|---:|---|---|---|---|
+| 1 | KEY2 | GPIO13 | Liga o botão KEY2 ao GPIO13 (conflita com SD D3/CS) | **OFF** |
+| 2 | DATA3 | GPIO13 | Liga a linha SD D3/CS ao GPIO13 | **ON** |
+| 3 | CMD | GPIO15 | Liga a linha SD CMD/MOSI ao GPIO15 | **ON** |
+| 4 | MTCK | GPIO13 | Liga MTCK do header JTAG ao GPIO13 (conflita com SD) | **OFF** |
+| 5 | MTDO | GPIO15 | Liga MTDO do header JTAG ao GPIO15 (conflita com SD) | **OFF** |
+
+Configuração final: **`OFF ON ON OFF OFF`**.
+
+Observações:
+- Em revisões antigas da placa, a serigrafia rotula `SD_CMD` / `SD_DATA3` nas posições 1 e 4 (e o resto reorganizado). A regra continua a mesma: **só DATA3 e CMD em ON, tudo que compartilha GPIO13/15 em OFF.**
+- **SD e JTAG não podem coexistir** — depurar via JTAG durante o boot exige reorganizar o DIP e perder o SD; por isso debug é feito via serial USB (`pio device monitor`).
+- KEY2 está sacrificado em troca do SD. Por isso o botão de start/stop deste projeto usa KEY3 (GPIO19), e não KEY2.
+- Diagnóstico de SD problemático: no log serial, `[SD] begin FALHOU` quase sempre = DIP errado. Em segundo lugar = cartão mal encaixado ou não-FAT32.
 
 ## Fluxo do sinal validado
 
