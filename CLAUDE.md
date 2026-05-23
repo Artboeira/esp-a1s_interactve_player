@@ -28,8 +28,10 @@ Loop de MP3 no **ESP32 Audio Kit V2.2 (ESP-A1S)** com saída pelo jack **EARPHON
 - ✅ SD card inicializa (SD_MMC 1-bit, 400 kHz)
 - ✅ Codec **ES8388** inicializa manualmente via I2C
 - ✅ I2S TX direto via `driver/i2s.h` legada
-- ✅ **Loop de `/loop.mp3` do SD → libhelix MP3 → I2S → ES8388 → headphone** (`src/main.cpp` atual)
-- ⏳ Próximas etapas do projeto: relé 2 canais, botão físico, possivelmente OSC/MQTT via WiFi
+- ✅ Playback `/loop.mp3` do SD → libhelix MP3 → I2S → ES8388 → headphone (`src/main.cpp`)
+- ✅ Toggle start/stop via KEY3 onboard (GPIO19, debug) **e** microswitch externo (GPIO22) em paralelo
+- ✅ EOF do MP3 → STOPPED (one-shot por toque; não loopa mais perpetuamente)
+- ⏳ Próximas etapas: relé 2 canais (uma das saídas alimenta o LED do microswitch), possivelmente OSC/MQTT via WiFi
 
 Dependências hoje no `platformio.ini`: apenas `pschatzmann/arduino-libhelix` (decoder MP3). A lib `esphome/ESP32-audioI2S` foi **removida** — ela não limpava o `DACMute` e era o motivo do "estalo sem áudio". O init manual do codec mora todo no `main.cpp`.
 
@@ -98,6 +100,10 @@ REG30 / REG31           = 0x1E   ← LOUT2/ROUT2 vol 0 dB
 | SD D3/CS | GPIO13 (manter HIGH antes do `SD_MMC.begin`) |
 | PA Enable (speaker amp) | GPIO21 — HIGH = liga amp. Não afeta o headphone. |
 | Headphone detect | GPIO39 — LOW = headphone conectado. Software-only (não roteia sozinho). |
+| Botão KEY3 (onboard, debug) | GPIO19 — pull-up físico na placa; pressionado = LOW |
+| Microswitch externo (play/stop) | COM → GND do header; NO → GPIO22 (com `INPUT_PULLUP`). LED do microswitch é alimentado pelo relé (não conecta ao ESP32). |
+| Módulo relé 2 canais | **IN1 → GPIO23, IN2 → GPIO18**. Fonte 5V dedicada; **GND da fonte 5V compartilhado com GND da A1S**. **Este módulo específico é active-HIGH** (`#define RELAY_ACTIVE_LOW 0`) — testado em bancada; o esperado seria active-low, mas inverteu. Se trocar de módulo, conferir e ajustar o define. Canais separados no hardware, espelhados via software em `relayWrite()`. GPIO16/17 são reservados para PSRAM do ESP-A1S e **não saem nos headers**. |
+| LED do microswitch (via relé canal 1) | LED+ → +12V; LED- → NC; COM relé → GND da fonte 12V. → Relé desarmado (IN=HIGH): LED aceso. Relé armado (IN=LOW): LED apagado. |
 
 ### DIP switches (crítico para o SD)
 
@@ -137,7 +143,7 @@ SD_MMC.setPins(14, 15, 2);
 SD_MMC.begin("/sdcard", true, false, 400000);   // true=1-bit, 400kHz
 ```
 
-## Pipeline atual (MP3 loop)
+## Pipeline atual
 
 ```
 SD_MMC (1-bit)  →  /loop.mp3
@@ -149,12 +155,46 @@ SD_MMC (1-bit)  →  /loop.mp3
   → LOUT1/ROUT1 + LOUT2/ROUT2
 ```
 
-Sample rate da I2S é ajustado no 1º frame decodificado (`i2s_set_clk` no callback do Helix). EOF → `audioFile.seek(0)` → loop perpétuo.
+Sample rate da I2S é ajustado no 1º frame decodificado (`i2s_set_clk` no callback do Helix).
 
 Pontos sensíveis para futuras mudanças:
 - O callback do Helix roda síncrono dentro de `mp3.write()`. Bloquear demais ali trava o `loop()`.
 - Mono MP3 é convertido para estéreo L=R em buffer estático (pra alimentar I2S em modo `RIGHT_LEFT`).
 - O init do ES8388 (especialmente `REG19 = 0x02` para limpar DACMute) é a parte que QUALQUER outra lib de áudio na A1S costuma esquecer. Se trocar de lib no futuro, copie esse init para depois da init da lib.
+
+## Estados do player e transições
+
+Há **dois estados** (`bool playing`). Toda mudança passa por uma de duas funções; quando o relé e o LED do botão entrarem, **é dentro delas que se mexe** — nunca espalhar transições pelo `loop()`.
+
+```
+                ┌───────────────────────────┐
+                │   STOPPED                 │
+                │   - DAC mutado (REG19=32) │
+                │   - DMA buffer zerado     │
+                │   - Relé IN1(GPIO23)=IN2(GPIO18)=HIGH (desarmados)
+                │   - LED microswitch: ACESO constante
+                └────────────┬──────────────┘
+                             │ botão (KEY3 ou microswitch externo) flanco ↓  →  playerStart()
+                             │
+                ┌────────────▼──────────────┐
+                │   PLAYING                 │
+                │   - DAC unmute (REG19=02) │
+                │   - decoder Helix resetado│
+                │   - audioFile.seek(0)     │
+                │   - Relé IN1(GPIO23)=IN2(GPIO18) alternando a cada 1 s
+                │   - LED microswitch: PISCANDO 1 Hz
+                └────────────┬──────────────┘
+                             │ botão (KEY3 ou microswitch externo) flanco ↓  OU  EOF do MP3
+                             │       → playerStop()
+                             └──→ volta a STOPPED
+```
+
+**Pontos sensíveis:**
+- `playerStop` espera o DMA buffer drenar (`delay(60)` no caminho EOF, antes do mute) para não cortar o final do áudio. No caminho via botão, mutar imediatamente é OK — o usuário quer silêncio agora.
+- `playerStart` faz `mp3.end()` + `mp3.begin()` para zerar bytes parciais de frame que sobraram da execução anterior, antes do `seek(0)`. Sem isso, o 1º frame após restart vem corrompido.
+- O estado inicial após boot é STOPPED (`#define START_PLAYING false`). Se quiser que a placa toque sozinha ao ligar, mude para `true`.
+- O `relayWrite()` é chamado direto dentro de `playerStart` (arma) e `playerStop` (desarma) → feedback visual instantâneo no LED. O blink propriamente dito é gerenciado pelo `relayUpdateBlink()` no `loop()` enquanto `playing == true`.
+- **Clique mecânico**: a 1 Hz o relé clica audivelmente e a bobina sofre desgaste com o tempo. Para instalação prolongada, considerar (a) aumentar `BLINK_HALF_PERIOD_MS`, (b) trocar por SSR, ou (c) cabear o LED direto a um GPIO via transistor (perde o controle do canal 2 de 12 V, mas elimina o clique).
 
 ## Plano B se algo der ruim
 

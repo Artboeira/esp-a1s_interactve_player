@@ -14,10 +14,15 @@ Player de áudio simples com loop contínuo de arquivo MP3 via cartão SD, para 
 - ✅ SD card inicializa (SD_MMC, modo 1-bit)
 - ✅ Codec ES8388 inicializa via I2C (`0x10`)
 - ✅ I2S TX manual via `driver/i2s.h` legada
-- ✅ **Loop de `/loop.mp3` do SD → libhelix → I2S → ES8388 → headphone**
-- ⏳ Próximo: relé 2 canais + botão físico; possivelmente OSC/MQTT via WiFi
+- ✅ Playback `/loop.mp3` do SD → libhelix → I2S → ES8388 → headphone
+- ✅ **Botões em paralelo:** KEY3 onboard (GPIO19, debug) + microswitch externo (GPIO22) — ambos toggle start/stop
+- ✅ EOF do MP3 → STOPPED (one-shot por toque, não loopa)
+- ✅ Relé 2 canais (IN1→GPIO23, IN2→GPIO18, active-low): canais separados no hw, espelhados via software por enquanto. STOPPED → LED aceso constante. PLAYING → LED piscando 1 Hz.
+- ⏳ Próximo: dar comportamentos distintos a IN1 e IN2 (cada um pra uma saída) e/ou OSC/MQTT via WiFi
 
-`src/main.cpp` é o player de loop. Dependência única hoje: `pschatzmann/arduino-libhelix`. O init do codec mora todo no `main.cpp` — `esphome/ESP32-audioI2S` foi removida do projeto.
+`src/main.cpp` é o player. Dois estados (`STOPPED` ↔ `PLAYING`), transições centralizadas em `playerStart()` / `playerStop()` — é onde o relé e o LED do botão vão entrar.
+
+Dependência única hoje: `pschatzmann/arduino-libhelix`. O init do codec mora todo no `main.cpp` — `esphome/ESP32-audioI2S` foi removida do projeto.
 
 ## Por que não tocava antes
 
