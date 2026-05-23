@@ -15,7 +15,27 @@ Player de áudio para instalação interativa, rodando em **AI-Thinker ESP32 Aud
 | Relé canal B | GPIO23 → IN; cabeado com o LED do microswitch via NC. Aceso em STOPPED; pisca por 3 s em PLAY e depois apaga. |
 | Alimentação | A1S via USB ou fonte 5 V no header; **módulo relé com fonte 5 V dedicada** e GND comum com a A1S. |
 
-DIP switches da placa (crítico pro SD funcionar): **`OFF ON ON OFF OFF`** nesta unidade — a ordem dos switches varia entre revisões; ver `CLAUDE.md` para detalhe.
+## DIP switches da placa
+
+A A1S V2.2 tem um DIP de 5 posições que funciona como **roteador dos GPIOs 13/14/15** — esses pinos do ESP32 são compartilhados entre o SD card, o botão KEY2 e o header JTAG. Como só uma função pode usar cada GPIO por vez, o DIP escolhe qual delas está fisicamente conectada. Para esse projeto usamos o SD; tudo que compartilhar GPIO13/15 com o SD deve estar OFF.
+
+Mapeamento nesta unidade (a ordem física varia por revisão da placa, confirmar na sua antes):
+
+| Pos | Rótulo | GPIO | Conflita com SD? | Estado |
+|---:|---|---|---|---|
+| 1 | KEY2 | GPIO13 | Sim | **OFF** |
+| 2 | DATA3 | GPIO13 | — (essencial pro SD) | **ON** |
+| 3 | CMD | GPIO15 | — (essencial pro SD) | **ON** |
+| 4 | MTCK | GPIO13 | Sim | **OFF** |
+| 5 | MTDO | GPIO15 | Sim | **OFF** |
+
+Configuração final: **`OFF ON ON OFF OFF`**.
+
+Notas práticas:
+- **SD e JTAG não convivem.** Para depurar via JTAG é preciso reorganizar o DIP e perder o SD; por isso depuração aqui é feita só via serial USB.
+- **KEY2 é sacrificado em troca do SD.** Por isso o botão de debug usa KEY3 (GPIO19), não KEY2.
+- **Diagnóstico**: `[SD] begin FALHOU` no serial é, em 9 de cada 10 casos, DIP errado. Em segundo lugar, cartão mal encaixado ou não-FAT32.
+- Em revisões mais antigas da placa, `DATA3`/`CMD` aparecem nas posições 1 e 4 (e o resto reorganizado). A regra continua: só essas duas em ON, todas as outras OFF. Detalhe técnico completo em `CLAUDE.md`.
 
 ## Comportamento
 
@@ -57,7 +77,20 @@ pio device monitor -b 115200  # serial
 pio run -t upload -t monitor  # upload + monitor (fluxo de iteração)
 ```
 
-Porta serial típica no Mac: `/dev/cu.usbserial-0001`. Se o `pio run -t upload` reclamar de porta inexistente, conferir cabo USB e drivers do conversor.
+### Descobrir a porta serial
+
+O caminho da porta pode mudar entre boots, especialmente se você usa hubs USB ou desconecta a placa. O `platformio.ini` deste projeto fixa `upload_port = /dev/cu.usbserial-0001`, que é o nome típico no Mac com CH340/CP2102 — se a sua for diferente, ajuste o `.ini` ou descubra primeiro:
+
+```bash
+pio device list                            # cross-platform: lista todas as portas + descrição
+ls /dev/cu.*                               # macOS: lista todos os devices serial
+ls /dev/cu.usbserial-* /dev/cu.SLAB_USBtoUART 2>/dev/null   # macOS: filtra só USB-serial
+ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null   # Linux
+```
+
+No Windows, o caminho é `COM3`, `COM4`, etc. — visível no **Device Manager → Ports (COM & LPT)** ou via `pio device list`.
+
+Se nenhum dispositivo aparece ao plugar a placa: cabo USB sem fios de dados (só carga) ou driver USB-serial faltando — ver "Pré-requisitos".
 
 ## Estrutura do projeto
 
