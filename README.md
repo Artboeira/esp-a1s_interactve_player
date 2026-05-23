@@ -13,7 +13,42 @@ Player de áudio para instalação interativa, rodando em **AI-Thinker ESP32 Aud
 | Botão externo | Microswitch SPDT: COM→GND, NO→GPIO22; LED interno do botão é alimentado via relé |
 | Relé canal A | GPIO18 → IN; cabeado com o ímã via NC. Liga em PLAY, desliga em STOP. |
 | Relé canal B | GPIO23 → IN; cabeado com o LED do microswitch via NC. Aceso em STOPPED; pisca por 3 s em PLAY e depois apaga. |
-| Alimentação | A1S via USB ou fonte 5 V no header; **módulo relé com fonte 5 V dedicada** e GND comum com a A1S. |
+| Alimentação | A1S via USB (UART pra dev) ou buck 5 V no conector POWER (instalação). Detalhes na seção "Alimentação". |
+
+## Alimentação
+
+Esta revisão da A1S V2.2 (variante A404) tem **dois conectores micro-USB com funções separadas**, indicados na serigrafia como `UART ↑ / POWER ↓`:
+
+| Conector | Função | Uso típico |
+|---|---|---|
+| Micro-USB de cima — **UART** | Serial + programação (CP2102). Não tem VBUS ligado à rail interna de 5 V. | Cabo direto pro computador durante dev: `pio device monitor`, flash. |
+| Micro-USB de baixo — **POWER** | Entrada 5 V dedicada (sem linhas de dados). | Fonte externa / buck 5 V da instalação final. |
+
+Como as duas entradas vivem em rails separadas, dá pra **manter ambas conectadas em paralelo**: USB UART no computador pra debug + buck 5 V no POWER alimentando a peça. Sem conflito de fontes brigando.
+
+A placa não expõe um pino "5V" em header — toda alimentação externa entra pelo conector POWER.
+
+### Cabear um buck 5 V no conector POWER
+
+Pega um cabo micro-USB qualquer, corta a ponta USB-A (a maior), descasca os 4 fios e usa só **vermelho (+5V)** e **preto (GND)**:
+
+```
+Buck 5V OUT  →  fio vermelho do cabo micro-USB
+Buck GND     →  fio preto do mesmo cabo (e mesmo GND do módulo relé)
+Plug micro-USB  →  conector POWER (o de baixo) da A1S
+```
+
+Os fios verde e branco (D+/D−) ficam isolados — esse conector só usa VBUS e GND. Para uma conexão mais firme, dá pra soldar fios direto nos pinos VBUS (1) e GND (5) do conector na placa.
+
+### Antes de plugar pela primeira vez
+
+- **Mede a tensão do buck com multímetro sem carga.** Buck mal ajustado entregando 6 V ou mais queima o AMS1117 interno da A1S em segundos.
+- **Capacidade do buck:** a A1S puxa ~300–400 mA (mais picos de WiFi se ativado). Some o consumo do ímã, LED e bobina do relé. Use um buck com **pelo menos 1 A de folga** sobre o total.
+- **GND único pra tudo.** O GND do buck precisa ser o mesmo do módulo relé E o mesmo que chega na A1S, senão as ligações de IN do relé ficam flutuando em referência à placa.
+
+### ⚠️ Cuidado com o JST `BAT+`
+
+No canto inferior esquerdo da placa há um conector JST 2-pin marcado **BAT+** — esse é entrada de **bateria LiPo (3.7–4.2 V)**, **não** entrada de 5 V. Aplicar 5 V ali queima o circuito de carga (TP4056 ao lado). Esse conector não tem uso neste projeto — deixe vazio.
 
 ## DIP switches da placa
 

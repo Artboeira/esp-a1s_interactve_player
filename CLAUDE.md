@@ -108,6 +108,7 @@ REG30 / REG31           = 0x1E   ← LOUT2/ROUT2 vol 0 dB
 | Relé canal B — LED do microswitch | IN → **GPIO23**. LED+ → +12V; LED- → NC; COM → GND 12V. Relé desarmado → NC fecha → LED aceso. PLAY pisca por `LED_BLINK_DURATION_MS` e depois fica apagado até STOP/EOF. |
 | Polaridade do módulo relé | **active-HIGH** (`#define RELAY_ACTIVE_LOW 0`) — testado em bancada. Se trocar de módulo, conferir o LED no estado STOPPED logo após boot: deve estar aceso. |
 | Alimentação do relé | Fonte 5V dedicada para a bobina/opto; **GND da fonte 5V compartilhado com GND da A1S** (sem isso o optoacoplador não enxerga o nível). |
+| Alimentação da A1S | Duas portas micro-USB separadas (variante A404 V1959): **UART** (de cima) só serial/programação; **POWER** (de baixo) entrada 5V dedicada. As duas vivem em rails distintos — dá pra manter USB UART no PC e buck 5V no POWER em paralelo sem conflito. A placa NÃO expõe pino "5V" em header. Não usar o JST `BAT+` para 5V (é entrada LiPo 3.7–4.2V, queima o TP4056). |
 | Não usar | GPIO16/17 — reservados para PSRAM do ESP-A1S, não saem nos headers. |
 
 ### DIP switches (crítico para o SD)
