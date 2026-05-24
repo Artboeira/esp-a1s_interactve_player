@@ -2,6 +2,8 @@
 
 Player de áudio para instalação interativa, rodando em **AI-Thinker ESP32 Audio Kit V2.2** (módulo **ESP-A1S** com codec **ES8388**). Cada toque no botão dispara um MP3 do começo, com saída no headphone; em paralelo, dois relés controlam um ímã (que acompanha o som) e o LED indicador do próprio botão.
 
+> 📐 **Mapa visual do hardware**: abra [`hardware_map.html`](hardware_map.html) no navegador para ver, fio a fio, o esquema de ligações, mapa de GPIOs, pipeline de áudio, máquina de estados e configuração do DIP. Diagrama do projeto, gerado e mantido junto com o código — costuma ser o jeito mais rápido de entender ou retomar o projeto.
+
 ## Hardware
 
 | Item | Detalhe |
@@ -14,6 +16,8 @@ Player de áudio para instalação interativa, rodando em **AI-Thinker ESP32 Aud
 | Relé canal A | GPIO18 → IN; cabeado com o ímã via **NO**. Liga em PLAY, desliga em STOP. |
 | Relé canal B | GPIO23 → IN; cabeado com o LED do microswitch via **NO**. Aceso em STOPPED; pisca por 3 s em PLAY e depois apaga. |
 | Alimentação | A1S via USB (UART pra dev) ou buck 5 V no conector POWER (instalação). Detalhes na seção "Alimentação". |
+
+Pra ver tudo no contexto físico (cores de fio, posições no header, NC vs NO, etc.), abra [`hardware_map.html`](hardware_map.html) — seção **01 · Esquema de Ligações** e **02 · Mapa de GPIOs**.
 
 ## Alimentação
 
@@ -64,7 +68,7 @@ Mapeamento nesta unidade (a ordem física varia por revisão da placa, confirmar
 | 4 | MTCK | GPIO13 | Sim | **OFF** |
 | 5 | MTDO | GPIO15 | Sim | **OFF** |
 
-Configuração final: **`OFF ON ON OFF OFF`**.
+Configuração final: **`OFF ON ON OFF OFF`**. Visualmente, ver [`hardware_map.html`](hardware_map.html) — seção **05 · DIP Switches**.
 
 Notas práticas:
 - **SD e JTAG não convivem.** Para depurar via JTAG é preciso reorganizar o DIP e perder o SD; por isso depuração aqui é feita só via serial USB.
@@ -84,6 +88,8 @@ Notas práticas:
 **Disparo do botão:**
 - STOPPED: **1 toque** inicia a reprodução.
 - PLAYING: precisa de **3 toques** dentro de uma janela de 1.5 s entre cada um — proteção contra parada acidental quando alguém esbarra no botão. Se passar a janela, o contador zera. EOF do MP3 sempre para sem precisar dos toques.
+
+Diagrama completo das transições em [`hardware_map.html`](hardware_map.html) — seção **04 · Máquina de Estados**.
 
 Constantes que dá pra ajustar em `src/main.cpp`:
 - `START_PLAYING` (false) — `true` faz a placa tocar sozinha ao ligar.
@@ -140,6 +146,8 @@ Se nenhum dispositivo aparece ao plugar a placa: cabo USB sem fios de dados (só
 ```
 src/main.cpp                  Player completo: ES8388 init, I2S, SD, Helix, relés, botões.
 platformio.ini                board=esp32dev, framework=arduino, lib única: arduino-libhelix.
+hardware_map.html             Mapa visual do hardware (esquema, GPIOs, pipeline, FSM, DIP).
+                              Abre direto no navegador, sem build.
 docs/main_mp3_loop.cpp.bak    Backup histórico (esphome/ESP32-audioI2S) — não restaurar.
 CLAUDE.md                     Contexto técnico para futura iteração com Claude Code.
 ```

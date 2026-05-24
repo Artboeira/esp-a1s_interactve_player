@@ -23,6 +23,10 @@ O CLI do PlatformIO costuma estar em `~/.platformio/penv/bin/pio` (não no PATH 
 
 Player one-shot de MP3 no **ESP32 Audio Kit V2.2 (ESP-A1S)** com saída pelo jack **EARPHONES (headphone)**, a partir de cartão SD. Cada toque no botão (KEY3 onboard ou microswitch externo) dispara `/loop.mp3` do começo. Dois relés acompanham o playback — um liga um ímã e outro controla o LED do microswitch.
 
+## Referência visual
+
+`hardware_map.html` na raiz do projeto é um diagrama HTML auto-contido com **esquema de ligações fio-a-fio, mapa de GPIOs, pipeline de áudio, máquina de estados e DIP switches**. Abre direto no navegador (sem build). Quando precisar entender ou explicar o cabeamento, é o lugar mais rápido — costuma economizar minutos de leitura aqui. Se mudar a topologia do hardware (pinos, NC/NO, novos periféricos), **atualize esse arquivo junto com a CLAUDE.md** para manter os dois coerentes.
+
 ## Estado atual
 
 - ✅ SD card inicializa (SD_MMC 1-bit, 400 kHz)
