@@ -29,10 +29,12 @@ Player one-shot de MP3 no **ESP32 Audio Kit V2.2 (ESP-A1S)** com saída pelo jac
 - ✅ Codec **ES8388** inicializa manualmente via I2C
 - ✅ I2S TX direto via `driver/i2s.h` legada
 - ✅ Playback `/loop.mp3` do SD → libhelix MP3 → I2S → ES8388 → headphone (`src/main.cpp`)
-- ✅ Toggle start/stop via KEY3 onboard (GPIO19, debug) **e** microswitch externo (GPIO22) em paralelo
-- ✅ EOF do MP3 → STOPPED (one-shot por toque)
-- ✅ Relé canal A (GPIO18) → ímã, cabeado no NC → on em PLAY, off em STOP
-- ✅ Relé canal B (GPIO23) → LED do microswitch, cabeado no NC → aceso em STOPPED, pisca 3 s e apaga em PLAY
+- ✅ Botões em paralelo: KEY3 onboard (GPIO19, debug) **e** microswitch externo (GPIO22)
+  - STOPPED: 1 toque inicia
+  - PLAYING: **3 toques** dentro de 1.5 s (proteção contra parada acidental)
+  - EOF do MP3 → STOPPED automático
+- ✅ Relé canal A (GPIO18) → ímã, cabeado no **NO** → on em PLAY, off em STOP
+- ✅ Relé canal B (GPIO23) → LED do microswitch, cabeado no **NO** → aceso em STOPPED, pisca 3 s e apaga em PLAY
 - ⏳ Próxima etapa: possivelmente OSC/MQTT via WiFi (controle remoto / sincronização entre peças)
 
 Dependências hoje no `platformio.ini`: apenas `pschatzmann/arduino-libhelix` (decoder MP3). A lib `esphome/ESP32-audioI2S` foi **removida** — ela não limpava o `DACMute` e era o motivo do "estalo sem áudio". O init manual do codec mora todo no `main.cpp`.
@@ -104,8 +106,8 @@ REG30 / REG31           = 0x1E   ← LOUT2/ROUT2 vol 0 dB
 | Headphone detect | GPIO39 — LOW = headphone conectado. Software-only (não roteia sozinho). |
 | Botão KEY3 (onboard, debug) | GPIO19 — pull-up físico na placa; pressionado = LOW |
 | Microswitch externo (play/stop) | COM → GND do header; NO → GPIO22 (com `INPUT_PULLUP`). LED do microswitch é alimentado pelo relé (não conecta ao ESP32). |
-| Relé canal A — ÍMÃ | IN → **GPIO18**. Ímã cabeado no **NC** do relé. Comportamento: STOPPED relé armado (NC aberto, ímã off); PLAY relé desarmado (NC fecha, ímã energizado). Lógica invertida no software por `#define MAGNET_ON_NC 1`. |
-| Relé canal B — LED do microswitch | IN → **GPIO23**. LED+ → +12V; LED- → NC; COM → GND 12V. Relé desarmado → NC fecha → LED aceso. PLAY pisca por `LED_BLINK_DURATION_MS` e depois fica apagado até STOP/EOF. |
+| Relé canal A — ÍMÃ | IN → **GPIO18**. Ímã cabeado no **NO** do relé (recomendado). Em STOPPED o relé está desarmado (NO aberto, ímã off — sem desgaste da bobina); em PLAY o relé arma (NO fecha, ímã energizado). Controlado por `#define MAGNET_ON_NC 0`. Para usar o cabeamento legado em NC, mover o fio e definir `MAGNET_ON_NC 1`. |
+| Relé canal B — LED do microswitch | IN → **GPIO23**. LED+ → +12V; LED- → **NO**; COM → GND 12V. Relé armado → NO fecha → LED aceso. PLAY pisca por `LED_BLINK_DURATION_MS` e depois fica apagado até STOP/EOF. Controlado por `#define LED_ON_NC 0`. |
 | Polaridade do módulo relé | **active-HIGH** (`#define RELAY_ACTIVE_LOW 0`) — testado em bancada. Se trocar de módulo, conferir o LED no estado STOPPED logo após boot: deve estar aceso. |
 | Alimentação do relé | Fonte 5V dedicada para a bobina/opto; **GND da fonte 5V compartilhado com GND da A1S** (sem isso o optoacoplador não enxerga o nível). |
 | Alimentação da A1S | Duas portas micro-USB separadas (variante A404 V1959): **UART** (de cima) só serial/programação; **POWER** (de baixo) entrada 5V dedicada. As duas vivem em rails distintos — dá pra manter USB UART no PC e buck 5V no POWER em paralelo sem conflito. A placa NÃO expõe pino "5V" em header. Não usar o JST `BAT+` para 5V (é entrada LiPo 3.7–4.2V, queima o TP4056). |
@@ -197,8 +199,9 @@ Há **dois estados** (`bool playing`). Toda mudança passa por uma de duas funç
                 │   - DMA buffer zerado            │
                 │   - Ímã (GPIO18) OFF             │
                 │   - LED (GPIO23) ACESO constante │
+                │   - stopTapCount = 0             │
                 └────────────┬─────────────────────┘
-                             │ botão (KEY3 ou microswitch externo) flanco ↓
+                             │ 1 toque em KEY3 ou microswitch
                              │   → playerStart()
                              │
                 ┌────────────▼─────────────────────┐
@@ -208,24 +211,27 @@ Há **dois estados** (`bool playing`). Toda mudança passa por uma de duas funç
                 │   - audioFile.seek(0)            │
                 │   - Ímã (GPIO18) ON durante toda a execução
                 │   - LED (GPIO23): primeiros 3 s → piscando 1 Hz
-                │                   após 3 s     → armado fixo → APAGADO
+                │                   após 3 s     → apagado fixo
                 └────────────┬─────────────────────┘
-                             │ botão (KEY3 ou microswitch externo) flanco ↓
-                             │ OU EOF do MP3
-                             │   → playerStop()
+                             │ EOF do MP3                 → playerStop()
+                             │ OU STOP_TAP_COUNT toques dentro de
+                             │ STOP_TAP_WINDOW_MS entre cada um  → playerStop()
                              └──→ volta a STOPPED
 ```
 
-Constantes que controlam o LED em `main.cpp`:
-- `LED_BLINK_DURATION_MS` (3000 hoje) — duração total da fase de blink após PLAY.
-- `LED_BLINK_HALF_PERIOD_MS` (500 hoje) — meio período do blink, 500 ms ON / 500 ms OFF → 1 Hz visual, ~3 piscadas em 3 s.
-- `MAGNET_ON_NC` (1 hoje) — ímã está no NC do relé; software inverte para que `magnetSet(true)` energize o ímã. Trocar fisicamente para NO + definir 0 reduz desgaste da bobina em instalações de longa duração.
+Constantes em `main.cpp`:
+- `LED_BLINK_DURATION_MS` (3000) — duração total da fase de blink do LED após PLAY.
+- `LED_BLINK_HALF_PERIOD_MS` (500) — meio período do blink, 500 ms ON / 500 ms OFF → 1 Hz visual.
+- `STOP_TAP_COUNT` (3) — número de toques necessários para parar enquanto tocando.
+- `STOP_TAP_WINDOW_MS` (1500) — janela máxima em ms entre toques consecutivos para a contagem ser válida; se passar, o contador zera.
+- `MAGNET_ON_NC` (0) e `LED_ON_NC` (0) — em qual saída do relé cada componente está cabeado. `0` (NO) é o recomendado; `1` (NC) força o relé a ficar permanentemente armado em repouso, gastando a bobina. Trocar o valor exige mover fisicamente o fio entre NC e NO no módulo.
 
 **Pontos sensíveis:**
 - `playerStop` espera o DMA buffer drenar (`delay(60)` no caminho EOF, antes do mute) para não cortar o final do áudio. No caminho via botão, mutar imediatamente é OK — o usuário quer silêncio agora.
 - `playerStart` faz `mp3.end()` + `mp3.begin()` para zerar bytes parciais de frame que sobraram da execução anterior, antes do `seek(0)`. Sem isso, o 1º frame após restart vem corrompido.
 - O estado inicial após boot é STOPPED (`#define START_PLAYING false`). Se quiser que a placa toque sozinha ao ligar, mude para `true`.
-- **Ímã e LED são controlados separadamente.** `magnetSet()` / `ledSet()` são chamados de `playerStart` / `playerStop` para sincronizar com o áudio; `ledUpdate()` é chamado no `loop()` e cuida da máquina interna do LED (blink 3 s → apagado fixo).
+- **Ímã e LED são controlados separadamente.** `magnetSet(on)` / `ledSet(on)` recebem a INTENÇÃO física (ligado/aceso) e traduzem internamente para o nível elétrico certo conforme `MAGNET_ON_NC` / `LED_ON_NC`. São chamados em `playerStart` / `playerStop` para sincronizar com o áudio; `ledUpdate()` é chamado no `loop()` e cuida da máquina interna do LED (blink → apagado fixo).
+- **Triplo toque para STOP**: `handleTap()` substitui o antigo `playerToggle()`. Em STOPPED, 1 toque já inicia. Em PLAYING, conta toques e só para ao atingir `STOP_TAP_COUNT`. Janela `STOP_TAP_WINDOW_MS` entre toques consecutivos — se um tap chega depois da janela, o contador reinicia. EOF do MP3 ignora a contagem e para direto.
 - **Clique mecânico durante o blink**: a 1 Hz o relé do LED clica 3× em 3 s. Já é curto, mas se incomodar dá pra trocar por SSR ou cabear o LED via transistor num GPIO PWM (perde o canal de 12 V controlável, mas remove o clique).
 
 ## Plano B se algo der ruim
@@ -244,4 +250,3 @@ Constantes que controlam o LED em `main.cpp`:
 ## Próximas etapas do projeto
 
 - Possivelmente controle OSC/MQTT via WiFi (padrão das instalações) — para sincronização entre peças ou controle remoto.
-- Avaliar trocar o relé do ímã (NC → NO) em instalação prolongada para evitar desgaste da bobina, conforme nota em `MAGNET_ON_NC`.

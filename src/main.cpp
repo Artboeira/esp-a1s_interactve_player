@@ -32,40 +32,50 @@
 #define PIN_MCLK     0
 #define PA_EN        21
 
-// Botões de start/stop (ambos toggle, em paralelo):
+// Botões em paralelo:
 //   KEY3 onboard da A1S V2.2 → GPIO19 (mantido para debug em bancada)
 //   Microswitch externo COM→GND, NO→GPIO22 (com pull-up interno)
-// Apertar qualquer um dispara playerToggle().
+//
+// Lógica de disparo:
+//   STOPPED: 1 toque inicia (start imediato)
+//   PLAYING: precisa de STOP_TAP_COUNT toques dentro de STOP_TAP_WINDOW_MS
+//            entre cada um. Janela expira → contador zera.
+//   Protege contra parada acidental quando alguém esbarra no botão.
 #define BUTTON_KEY3_PIN  19
 #define BUTTON_EXT_PIN   22
 #define BUTTON_DEBOUNCE_MS 30
+#define STOP_TAP_COUNT      3
+#define STOP_TAP_WINDOW_MS  1500
 
 // Relé externo 2 canais (alimentação 5V dedicada, GND comum com A1S).
 // Módulo testado em bancada: active-HIGH (RELAY_ACTIVE_LOW=0).
 //
 // Mapeamento desta instalação:
-//   ÍMÃ  →  GPIO18 → IN do canal cabeado em série com a bobina do ímã,
-//           via NC (ver MAGNET_ON_NC abaixo). Liga em PLAY, desliga em STOP.
+//   ÍMÃ  →  GPIO18 → IN do canal em série com a bobina do ímã.
+//           Liga em PLAY, desliga em STOP.
 //   LED  →  GPIO23 → IN do canal do LED do microswitch.
-//           LED+ → +12V; LED- → NC; COM canal → GND 12V.
-//           relé DESARMADO → NC fecha → LED ACESO
-//           relé ARMADO    → NO fecha → LED APAGADO
-//           Em STOPPED: aceso constante. Em PLAY: pisca por LED_BLINK_DURATION_MS,
-//           depois fica apagado até STOP/EOF.
+//           Em STOPPED: aceso constante.
+//           Em PLAY: pisca por LED_BLINK_DURATION_MS, depois fica apagado
+//                    até STOP/EOF.
+//
+// MAGNET_ON_NC e LED_ON_NC indicam em qual saída do relé o componente
+// está fisicamente cabeado:
+//   = 0 → cabeado no NO (recomendado). Relé desarmado = circuito aberto.
+//         Em repouso (STOPPED p/ ímã, e em parte do PLAY p/ LED), o relé
+//         fica DESARMADO — sem desgaste contínuo da bobina.
+//   = 1 → cabeado no NC (legado). Relé desarmado fecha o circuito; para
+//         manter o componente desligado o relé precisa ficar ARMADO o
+//         tempo todo, gastando a bobina.
+// Trocar valor exige mover fisicamente o fio do componente entre NC e NO
+// no módulo relé; só recompilar não basta.
 //
 // GPIO16/17 são reservados para PSRAM do módulo ESP-A1S — NÃO saem nos
 // headers, não usar.
 #define MAGNET_PIN 18
 #define LED_PIN    23
 #define RELAY_ACTIVE_LOW 0    // testado em bancada: este módulo é active-HIGH.
-
-// Ímã cabeado no NC do relé: energiza naturalmente quando o relé está
-// desarmado. Para inverter, mover o fio do ímã do NC pro NO no módulo e
-// trocar este define para 0.
-// Atenção: com MAGNET_ON_NC=1, em STOPPED o relé fica permanentemente
-// armado para manter o ímã off — desgaste contínuo da bobina ao longo do
-// tempo. Para instalação prolongada, prefira trocar para NO + MAGNET_ON_NC=0.
-#define MAGNET_ON_NC 1
+#define MAGNET_ON_NC 0        // 0 = NO (recomendado), 1 = NC
+#define LED_ON_NC    0        // 0 = NO (recomendado), 1 = NC
 
 #define LED_BLINK_DURATION_MS    3000  // duração total da fase de blink após PLAY
 #define LED_BLINK_HALF_PERIOD_MS 500   // 500 ms ON / 500 ms OFF → 1 Hz, ~3 piscadas em 3 s
@@ -208,9 +218,12 @@ static bool playing = false;
 
 // ---------------- relays ----------------
 
-static bool magnetArmed = false;
-static bool ledArmed    = false;     // ledArmed=true  →  LED APAGADO (NC aberto)
-                                     // ledArmed=false →  LED ACESO  (NC fechado)
+// Semântica clara: magnetOn / ledOn descrevem o ESTADO FÍSICO do componente
+// (energizado/aceso), não o nível do GPIO. As helpers magnetSet/ledSet
+// traduzem isso para o nível elétrico certo conforme o cabeamento NC/NO
+// e a polaridade active-low/high do módulo.
+static bool magnetOn = false;
+static bool ledOn    = false;
 static unsigned long playStartMs   = 0;
 static unsigned long ledLastFlipMs = 0;
 
@@ -218,39 +231,43 @@ static int activeLevel(bool armed) {
   return RELAY_ACTIVE_LOW ? (armed ? LOW : HIGH) : (armed ? HIGH : LOW);
 }
 
+// Dado o estado desejado (on = componente ATIVO), retorna se o relé deve
+// estar armado. Componente no NO → on coincide com armar (NO fecha). Componente
+// no NC → on exige desarmar (NC fecha quando relé em repouso).
+static inline bool relayArmedFor(bool componentOn, bool onNC) {
+  return onNC ? !componentOn : componentOn;
+}
+
 static void magnetSet(bool on) {
-  // on = ímã energizado fisicamente. Se cabeado no NC, precisamos do
-  // relé DESARMADO para fechar o circuito do ímã.
-  bool relayArmed = MAGNET_ON_NC ? !on : on;
-  digitalWrite(MAGNET_PIN, activeLevel(relayArmed));
-  magnetArmed = on;
+  digitalWrite(MAGNET_PIN, activeLevel(relayArmedFor(on, MAGNET_ON_NC)));
+  magnetOn = on;
 }
 
-static void ledSet(bool armed) {
-  digitalWrite(LED_PIN, activeLevel(armed));
-  ledArmed = armed;
+static void ledSet(bool on) {
+  digitalWrite(LED_PIN, activeLevel(relayArmedFor(on, LED_ON_NC)));
+  ledOn = on;
 }
 
-// Chamada continuamente no loop. Garante o estado do LED conforme a
-// máquina de estados:
-//   STOPPED                    → LED aceso (desarmado)
+// Chamada continuamente no loop. Garante o estado físico do LED conforme
+// a máquina de estados:
+//   STOPPED                    → LED aceso
 //   PLAYING, primeiros 3 s     → LED piscando 1 Hz
-//   PLAYING, após 3 s          → LED apagado (armado fixo)
+//   PLAYING, após 3 s          → LED apagado fixo
 static void ledUpdate() {
   if (!playing) {
-    if (ledArmed) ledSet(false);
+    if (!ledOn) ledSet(true);
     return;
   }
   unsigned long now = millis();
   unsigned long elapsed = now - playStartMs;
   if (elapsed < LED_BLINK_DURATION_MS) {
     if (now - ledLastFlipMs >= LED_BLINK_HALF_PERIOD_MS) {
-      ledSet(!ledArmed);
+      ledSet(!ledOn);
       ledLastFlipMs = now;
     }
   } else {
-    if (!ledArmed) {
-      ledSet(true);
+    if (ledOn) {
+      ledSet(false);
       Serial.println("[led] blink terminou, mantendo apagado");
     }
   }
@@ -258,13 +275,18 @@ static void ledUpdate() {
 
 // ---------------- player state ----------------
 
+// Contador de toques pra triplo-clique de STOP. Resetado em start/stop.
+static int           stopTapCount = 0;
+static unsigned long stopTapLastMs = 0;
+
 static void playerStop() {
   if (!playing) return;
   playing = false;
   es_write(0x19, 0x32);                  // mute DAC (limpa pop)
   i2s_zero_dma_buffer(I2S_PORT);
   magnetSet(false);                      // desliga ímã
-  ledSet(false);                         // LED volta aceso constante
+  ledSet(true);                          // LED volta aceso constante
+  stopTapCount = 0;
   Serial.println("[player] STOP");
 }
 
@@ -279,12 +301,30 @@ static void playerStart() {
   playStartMs = millis();
   ledLastFlipMs = playStartMs;
   magnetSet(true);                       // liga ímã imediatamente
-  ledSet(true);                          // LED apaga já — 1ª meia-onda do blink
+  ledSet(false);                         // LED apaga já — 1ª meia-onda do blink
+  stopTapCount = 0;
   Serial.println("[player] START (ímã ON, LED blink 3 s)");
 }
 
-static void playerToggle() {
-  if (playing) playerStop(); else playerStart();
+// Despachador unificado dos botões.
+//   STOPPED → 1 toque inicia.
+//   PLAYING → precisa de STOP_TAP_COUNT toques dentro da janela
+//             STOP_TAP_WINDOW_MS entre toques consecutivos.
+static void handleTap() {
+  if (!playing) {
+    playerStart();
+    return;
+  }
+  unsigned long now = millis();
+  if (now - stopTapLastMs > STOP_TAP_WINDOW_MS) {
+    stopTapCount = 0;                    // janela expirou → recomeça contagem
+  }
+  stopTapCount++;
+  stopTapLastMs = now;
+  Serial.printf("[player] tap %d/%d para STOP\n", stopTapCount, STOP_TAP_COUNT);
+  if (stopTapCount >= STOP_TAP_COUNT) {
+    playerStop();
+  }
 }
 
 // ---------------- buttons ----------------
@@ -314,8 +354,8 @@ static bool pollOne(ButtonState &b) {
 }
 
 static void pollButtons() {
-  if (pollOne(btnKey3)) { Serial.println("[btn] KEY3"); playerToggle(); }
-  if (pollOne(btnExt))  { Serial.println("[btn] EXT (microswitch)"); playerToggle(); }
+  if (pollOne(btnKey3)) { Serial.println("[btn] KEY3"); handleTap(); }
+  if (pollOne(btnExt))  { Serial.println("[btn] EXT (microswitch)"); handleTap(); }
 }
 
 // ---------------- setup / loop ----------------
@@ -354,14 +394,14 @@ void setup() {
   pinMode(BUTTON_EXT_PIN,  INPUT_PULLUP);
 
   // Relés: fixa o nível ANTES de virar OUTPUT para evitar pulso espúrio no boot.
-  //  - Ímã: queremos OFF. Se cabeado no NC, isso exige o relé ARMADO.
-  //  - LED: queremos ACESO. Cabeado no NC → relé DESARMADO.
-  digitalWrite(MAGNET_PIN, activeLevel(MAGNET_ON_NC ? true : false));
-  digitalWrite(LED_PIN,    activeLevel(false));
+  //  Estado inicial desejado: ímã OFF, LED ON. As helpers já fazem a tradução
+  //  certa para NC vs NO, mas precisamos o digitalWrite antes do pinMode.
+  digitalWrite(MAGNET_PIN, activeLevel(relayArmedFor(false, MAGNET_ON_NC)));
+  digitalWrite(LED_PIN,    activeLevel(relayArmedFor(true,  LED_ON_NC)));
   pinMode(MAGNET_PIN, OUTPUT);
   pinMode(LED_PIN,    OUTPUT);
   magnetSet(false);
-  ledSet(false);
+  ledSet(true);
 
   // Estado inicial
   if (START_PLAYING) {

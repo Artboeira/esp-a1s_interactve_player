@@ -11,8 +11,8 @@ Player de áudio para instalação interativa, rodando em **AI-Thinker ESP32 Aud
 | Áudio | Saída pelo jack EARPHONES (LOUT1/ROUT1); o speaker da placa também toca em paralelo se PA_EN=HIGH |
 | Botão debug | KEY3 onboard (GPIO19) — toggle play/stop |
 | Botão externo | Microswitch SPDT: COM→GND, NO→GPIO22; LED interno do botão é alimentado via relé |
-| Relé canal A | GPIO18 → IN; cabeado com o ímã via NC. Liga em PLAY, desliga em STOP. |
-| Relé canal B | GPIO23 → IN; cabeado com o LED do microswitch via NC. Aceso em STOPPED; pisca por 3 s em PLAY e depois apaga. |
+| Relé canal A | GPIO18 → IN; cabeado com o ímã via **NO**. Liga em PLAY, desliga em STOP. |
+| Relé canal B | GPIO23 → IN; cabeado com o LED do microswitch via **NO**. Aceso em STOPPED; pisca por 3 s em PLAY e depois apaga. |
 | Alimentação | A1S via USB (UART pra dev) ou buck 5 V no conector POWER (instalação). Detalhes na seção "Alimentação". |
 
 ## Alimentação
@@ -79,9 +79,17 @@ Notas práticas:
 | **STOPPED** (boot ou pós-EOF) | mudo (DAC mute) | OFF | aceso constante |
 | **PLAYING**, primeiros 3 s | tocando do início | ON | piscando 1 Hz (~3 piscadas) |
 | **PLAYING**, após 3 s | continua tocando | ON | apagado fixo |
-| **EOF do MP3** ou 2º toque | para com fade do buffer DMA | volta a OFF | volta a aceso |
+| **EOF do MP3** ou triplo toque | para com fade do buffer DMA | volta a OFF | volta a aceso |
 
-Iniciar tocando direto após o boot: trocar `#define START_PLAYING false` para `true` no `src/main.cpp`.
+**Disparo do botão:**
+- STOPPED: **1 toque** inicia a reprodução.
+- PLAYING: precisa de **3 toques** dentro de uma janela de 1.5 s entre cada um — proteção contra parada acidental quando alguém esbarra no botão. Se passar a janela, o contador zera. EOF do MP3 sempre para sem precisar dos toques.
+
+Constantes que dá pra ajustar em `src/main.cpp`:
+- `START_PLAYING` (false) — `true` faz a placa tocar sozinha ao ligar.
+- `STOP_TAP_COUNT` (3) e `STOP_TAP_WINDOW_MS` (1500) — quantos toques e a janela entre eles para parar.
+- `LED_BLINK_DURATION_MS` (3000) e `LED_BLINK_HALF_PERIOD_MS` (500) — duração da fase de blink do LED e velocidade do pisca.
+- `MAGNET_ON_NC` e `LED_ON_NC` (ambos 0 = NO) — em qual saída do relé cada componente está cabeado.
 
 ## Por que esse projeto existe (e por que dá tanto trabalho)
 
@@ -139,4 +147,3 @@ CLAUDE.md                     Contexto técnico para futura iteração com Claud
 ## Próximas etapas
 
 - Controle remoto via OSC ou MQTT (WiFi) — sincronizar peças ou disparar via servidor.
-- Trocar o cabeamento do ímã do NC → NO + `MAGNET_ON_NC=0` em instalação prolongada, para evitar desgaste da bobina (em STOPPED o relé do ímã fica permanentemente energizado para manter o ímã off).
